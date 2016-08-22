@@ -1,0 +1,78 @@
+$sendMail = {
+ Write-Host ('Send ' + $this.TopLevelControl.Name)
+ $table = $this.TopLevelControl.Controls[0];
+ $smtpServer = $table.Controls.Find('SMTPBox', $true)[0].Text
+ $port = 25
+ $from = $table.Controls.Find('FromBox', $true)[0].Text
+ $to = $table.Controls.Find('ToBox', $true)[0].Text
+ $subject = $table.Controls.Find('SubjectBox',$true)[0].Text
+ $body = $table.Controls.Find('BodyBox', $true)[0].Text
+ $encoding = [System.Text.Encoding]::GetEncoding($form.Controls.Find('EncodingBox', $true)[0].SelectedItem.CodePage)
+ $ssl = $table.Controls.Find('SSLBox', $true)[0].Checked
+ $logon = $table.Controls.Find('LogonBox', $true)[0].Checked
+ if ($logon) {
+  $credential = Get-Credential -Message 'SMTP server credentials' -UserName $from
+ }
+ if ($logon) {
+  Write-Host ("Send-MailMessage -To '$to' -Subject '$subject' -Body '$body' -Encoding '" + $encoding.CodePage + "' -From '$from' -SmtpServer '$smtpServer' -Port $port -UseSsl:$ssl -Credential '" + $credential.UserName + "'")
+ }
+ else {
+  Write-Host ("Send-MailMessage -To '$to' -Subject '$subject' -Body '$body' -Encoding '" + $encoding.CodePage + "' -From '$from' -SmtpServer '$smtpServer' -Port $port -UseSsl:$ssl")
+ }
+ $this.TopLevelControl.DialogResult = [System.Windows.Forms.DialogResult]::OK
+ $this.TopLevelControl.Visible = $false
+ $this.TopLevelControl.Close()
+ if ($logon) {
+  Send-MailMessage -To $to -Subject $subject -Body $body -Encoding $encoding -From $from -SmtpServer $smtpServer -Port $port -UseSsl:$ssl -Credential $credential
+ }
+ else {
+  Send-MailMessage -To $to -Subject $subject -Body $body -Encoding $encoding -From $from -SmtpServer $smtpServer -Port $port -UseSsl:$ssl
+ }
+}
+
+$cancelMail = {
+ Write-Host ('Cancel ' + $this.TopLevelControl.Name)
+ $this.TopLevelControl.DialogResult=[System.Windows.Forms.DialogResult]::Cancel
+ $this.TopLevelControl.Close()
+}
+
+$keyDownHandler = {
+ switch ([System.Windows.Forms.Keys]($_.KeyCode)) {
+  ([System.Windows.Forms.Keys]::Escape) {$cancelMail.Invoke()}
+#  default {Write-Host ('$_.KeyCode: ' + $_ + ' - $key.KeyCode: ' + $key.KeyCode)}
+ }
+}
+
+
+Add-Type -AssemblyName 'System.Windows.Forms'
+[System.String[]]$smtpServers = @(
+ 'smtp.gmail.com'
+)
+($smtpAutoCompleteStringCollection = New-Object -TypeName 'System.Windows.Forms.AutoCompleteStringCollection').AddRange($smtpServers)
+
+$mailForm = [xml]@'
+<Form Name="'MailFormForm'" Width="337" Height="402" StartPosition="'CenterScreen'" Text="'Mail form'" KeyPreview="$true" KeyDown="$keyDownHandler" Resize="{Write-Host $this.Height}">
+ <TableLayoutPanel Name="'MailFormTable'" ColumnCount="2" RowCount="5" GrowStyle="'AddRows'" BorderStyle="'FixedSingle'" CellBorderStyle="'InsetDouble'" AutoSize="$true">
+  <Label Text="'SMTPServer'" /> <TextBox Width="200"  Name="'SMTPBox'"     Text="''"         AutoCompleteMode="[System.Windows.Forms.AutoCompleteMode]::SuggestAppend" AutoCompleteSource="[System.Windows.Forms.AutoCompleteSource]::CustomSource" AutoCompleteCustomSource="$smtpAutoCompleteStringCollection" />
+  <Label Text="'From'" />       <TextBox Width="200"  Name="'FromBox'"     Text="''" />
+  <Label Text="'To'" />         <TextBox Width="200"  Name="'ToBox'"       Text="''" />
+  <Label Text="'Subject'" />    <TextBox Width="200"  Name="'SubjectBox'"  Text="''" />
+  <Label Text="'Body'" />       <TextBox Width="200"  Name="'BodyBox'"     Lines="@('')" AcceptsReturn="$true" AcceptsTab="$false" Height="100" Multiline="$true" WordWrap="$true" ScrollBars="'Vertical'" />
+  <Label Text="'Encoding'" />   <ComboBox Width="200" Name="'EncodingBox'" AutoCompleteMode="'Append'" AutoCompleteSource="'ListItems'" DropDownStyle="'DropDown'" DisplayMember="'DisplayName'" ValueMember="'Name'" />
+  <Label Text="'SSL'" />        <CheckBox             Name="'SSLBox'" />
+  <Label Text="'Logon'" />      <CheckBox             Name="'LogonBox'" />
+  <Button Name="'SendButton'" Text="'Send'" Height="30" Width="60" Left="0" Click="$sendMail" /> <Button Name="'CancelButton'" Text="'Cancel'" Height="30" Width="60" Click="$cancelMail" />
+ </TableLayoutPanel>
+</Form>
+'@
+
+$form = ConvertTo-Form -Manifest $mailForm -Verbose
+$encodings = [System.Text.Encoding]::GetEncodings() | Sort-Object -Property 'DisplayName'
+$currentEncoding = [System.Text.Encoding]::GetEncoding($host.CurrentCulture.TextInfo.ANSICodePage)
+$form.Controls.Find('EncodingBox', $true)[0].Items.AddRange($encodings)
+$form.Controls.Find('EncodingBox', $true)[0].SelectedItem = $form.Controls.Find('EncodingBox', $true)[0].Items | Where-Object {$_.CodePage -eq $currentEncoding.CodePage}
+
+$result = $form.ShowDialog()
+
+# KeyPreview="$true" KeyDown="$keyDownHandler"
+# CancelButton="$this.Controls[0].Controls[11]"
