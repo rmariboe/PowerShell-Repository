@@ -1,0 +1,34 @@
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Confirm:$false -Force
+
+. '.\Run-AsTrustedInstaller.ps1'
+
+function Test-RunAsTrustedInstaller {
+ [CmdletBinding()]
+ param (
+  $test = 'hest'
+ )
+
+### Identity switch BEGIN ###
+ $isSystem = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name -eq 'NT AUTHORITY\SYSTEM'
+ if (-not $isSystem) {
+  Write-Host ('Is ' + [System.Security.Principal.WindowsIdentity]::GetCurrent().Name + ' - Run-AsTrustedInstaller') -ForegroundColor 'Cyan'
+  Run-AsTrustedInstaller -Invocation $MyInvocation -Verbose:(-not -not $PSBoundParameters['Verbose']) ## $MyInvocation must be passed from calling function if calling function is part of module
+  Write-Host ('Done being TrustedInstaller') -ForegroundColor 'Cyan'
+  return $null #$output
+ }
+ Write-Host ('Is ' + [System.Security.Principal.WindowsIdentity]::GetCurrent().Name + ' - continuing') -ForegroundColor Green
+
+ ## As one-liner BEGIN ##
+ ##  if ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name -ne 'NT AUTHORITY\SYSTEM') {Run-AsTrustedInstaller -Invocation $MyInvocation -Verbose:(-not -not $PSBoundParameters['Verbose']); return $null}
+ ## As one-liner  END  ##
+### Identity switch  END  ###
+
+### Actual code below ###
+
+ Write-Host ($test)
+}
+
+Test-RunAsTrustedInstaller -test 'Yaay' -Verbose
+
+
+
