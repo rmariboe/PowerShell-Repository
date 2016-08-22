@@ -1,0 +1,84 @@
+function Create-SQLConnection {
+ #https://msdn.microsoft.com/en-us/library/system.data.sqlclient.sqlconnection.connectionstring.aspx
+ [CmdletBinding()]
+ param (
+  [Parameter(Mandatory=$true)][System.String]$Server,
+  [Alias('Database')][Parameter(Mandatory=$true)][System.String]$InitialCatalog,
+  [Parameter(Mandatory=$false)][System.String]$UserId,
+  [Parameter(Mandatory=$false)][System.Object]$Password,
+  [Alias('TrustedConnection')][Parameter(Mandatory=$false)][Switch]$IntegratedSecurity = (-not ($UserName -and $Password))
+ )
+
+ [System.String]$connectionString = "Server=$Server; Initial Catalog=$InitialCatalog"
+
+ if ($IntegratedSecurity) {
+  Write-Verbose -Message ('Integrated Security requested')
+  if ($UserName -or $Password) {
+   Write-Verbose -Message ('UserName or Password for local SQL login provided - but will be ignored')
+  }
+  $connectionString += '; Integrated Security=SSPI'
+ }
+ elseif ($UserName -and $Password) {
+  Write-Verbose -Message ('UserName and Password for local SQL login provided')
+#  $connectionString += "; User Id=$UserName; Password=$Password" ## Insecure method - utilize below instead
+  if ($Password.GetType() -ne [System.Security.SecureString]) {
+   Write-Verbose -Message ('Password not SecureString - converting')
+   [System.Security.SecureString]$Password = ConvertTo-SecureString -String $Password -AsPlainText -Force
+  }
+  $Password.MakeReadOnly()
+  [System.Data.SqlClient.SqlCredential]$sqlCredential = New-Object -TypeName 'System.Data.SqlClient.SqlCredential' -ArgumentList @([System.String]$UserName, [System.Security.SecureString]$Password)
+
+  return New-Object -TypeName 'System.Data.SqlClient.SqlConnection' -ArgumentList @($connectionString, $sqlCredential)
+ }
+
+ return New-Object -TypeName 'System.Data.SqlClient.SqlConnection' -ArgumentList $connectionString
+}
+
+function Query-SQLConnection {
+ param (
+  [Parameter(Mandatory=$true)][System.String]$Query,
+  [Parameter(Mandatory=$true)][System.Data.SqlClient.SqlConnection]$SQLConnection
+ )
+
+ [System.Data.SqlClient.SqlCommand]$sqlCommand = New-Object -TypeName 'System.Data.SqlClient.SqlCommand' -ArgumentList @($Query, $SQLConnection)
+
+ if ($SQLConnection.State -ne 'Open') {
+  $SQLConnection.Open()
+ }
+
+ [System.Data.SqlClient.SqlDataReader]$sqlDataReader = $sqlCommand.ExecuteReader()
+
+ $return = while ($sqlDataReader.Read()) {
+  $sqlDataReader[0..($sqlDataReader.FieldCount)]
+ }
+
+ $sqlDataReader.Close()
+ $sqlDataReader.Dispose()
+
+ return $return
+}
+
+function Destroy-SQLConnection {
+ param (
+  [System.Data.SqlClient.SqlConnection]$SQLConnection
+ )
+
+ if ($SQLConnection.State -ne 'Closed') {
+  $SQLConnection.Close()
+ }
+
+ $SQLConnection.Dispose()
+
+ return $null
+}
+
+<#
+[System.Data.SqlClient.SqlConnection]$SQLConnection = Create-SQLConnection -Server 'SQL2014SP1' -InitialCatalog 'master'
+
+[System.Data.SqlClient.SqlConnection]$SQLConnection = Create-SQLConnection -Server 'SQL2014SP1' -InitialCatalog 'master' -UserName 'LocalUser' -Password 'Start123'
+
+Query-SQLConnection -Query "SELECT @@version" -SQLConnection $SQLConnection
+
+[array]$databases = Query-SQLConnection -Query "SELECT name FROM sys.databases" -SQLConnection $SQLConnection
+$null = Destroy-SQLConnection -SQLConnection $SQLConnection
+#>
