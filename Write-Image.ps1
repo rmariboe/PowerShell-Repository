@@ -1,3 +1,6 @@
+Set-ExecutionPolicy -ExecutionPolicy 'Bypass' -Scope 'Process' -Force
+. '.\New-Graphics.ps1'
+
 Add-Type -AssemblyName 'System.Drawing'
 
 function Write-Image {
