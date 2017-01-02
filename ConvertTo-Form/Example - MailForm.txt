@@ -1,15 +1,15 @@
 $sendMail = {
  Write-Host ('Send ' + $this.TopLevelControl.Name)
- $table = $this.TopLevelControl.Controls[0];
+ $table =      $this.TopLevelControl.Controls[0];
  $smtpServer = $table.Controls.Find('SMTPBox', $true)[0].Text.Split(':')[0]
- $port = $table.Controls.Find('SMTPBox', $true)[0].Text.Split(':')[1]
- $from = $table.Controls.Find('FromBox', $true)[0].Text
- $to = $table.Controls.Find('ToBox', $true)[0].Text
- $subject = $table.Controls.Find('SubjectBox',$true)[0].Text
- $body = $table.Controls.Find('BodyBox', $true)[0].Text
- $encoding = [System.Text.Encoding]::GetEncoding($form.Controls.Find('EncodingBox', $true)[0].SelectedItem.CodePage)
- $ssl = $table.Controls.Find('SSLBox', $true)[0].Checked
- $logon = $table.Controls.Find('LogonBox', $true)[0].Checked
+ $port =       $table.Controls.Find('SMTPBox', $true)[0].Text.Split(':')[1]
+ $from =       $table.Controls.Find('FromBox', $true)[0].Text
+ $to =         $table.Controls.Find('ToBox', $true)[0].Text
+ $subject =    $table.Controls.Find('SubjectBox',$true)[0].Text
+ $body =       $table.Controls.Find('BodyBox', $true)[0].Text
+ $encoding =   [System.Text.Encoding]::GetEncoding($form.Controls.Find('EncodingBox', $true)[0].SelectedItem.CodePage)
+ $ssl =        $table.Controls.Find('SSLBox', $true)[0].Checked
+ $logon =      $table.Controls.Find('LogonBox', $true)[0].Checked
  if (-not $port) {
   $port = 25
  }
@@ -39,10 +39,14 @@ $cancelMail = {
  $this.TopLevelControl.Close()
 }
 
-$keyDownHandler = {
- switch ([System.Windows.Forms.Keys]($_.KeyCode)) {
+#$global:keyLog = @()
+$keyDownHandler = {$keyDownHandler = {
+ $keyEventArgs = $_
+# $global:keyLog += $keyEventArgs
+ switch ([System.Windows.Forms.Keys]($keyEventArgs.KeyCode)) {
+  ([System.Windows.Forms.Keys]::Return) {if ($keyEventArgs.Modifiers -eq [System.Windows.Forms.Keys]::Control) {$sendMail.Invoke()}}
   ([System.Windows.Forms.Keys]::Escape) {$cancelMail.Invoke()}
-#  default {Write-Host ('$_.KeyCode: ' + $_ + ' - $key.KeyCode: ' + $key.KeyCode)}
+#  default {Write-Host ('$keyEventArgs.KeyCode: ' + $keyEventArgs.KeyCode)}
  }
 }
 
