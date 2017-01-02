@@ -40,7 +40,7 @@ $cancelMail = {
 }
 
 #$global:keyLog = @()
-$keyDownHandler = {$keyDownHandler = {
+$keyDownHandler = {
  $keyEventArgs = $_
 # $global:keyLog += $keyEventArgs
  switch ([System.Windows.Forms.Keys]($keyEventArgs.KeyCode)) {
