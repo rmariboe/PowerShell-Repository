@@ -1,23 +1,44 @@
 function Get-WindowsIdentity {
  param (
-  [Parameter(Mandatory=$false)][AllowNull()][AllowEmptyString()][System.Management.Automation.PSCredential]$Credential = $null
+  [Parameter(Mandatory=$false)][AllowNull()][AllowEmptyString()][System.Management.Automation.PSCredential]$Credential = $null,
+  [Parameter(Mandatory=$false)][AllowNull()][AllowEmptyString()][System.Security.Principal.WindowsIdentity]$WindowsIdentity = $null,
+  [Parameter(Mandatory=$false)][System.Int32]$LogonType = 2, # 2 = LOGON32_LOGON_INTERACTIVE; 3 = LOGON32_LOGON_NETWORK
+  [Parameter(Mandatory=$false)][System.Int32]$ImpersonationLevel = 2 # 0 = Anonymous; 1 = Identification; 2 = Impersonation; 3 = Delegation
  )
 
- [System.IntPtr]$userToken = [Security.Principal.WindowsIdentity]::GetCurrent().Token
+ $advapi32 = Add-Type -Name 'advapi32' -MemberDefinition @"
+  // http://msdn.microsoft.com/en-us/library/aa378184.aspx
+  [DllImport("advapi32.dll", SetLastError = true)]
+  public static extern bool LogonUser(string lpszUsername, string lpszDomain, string lpszPassword, int dwLogonType, int dwLogonProvider, ref IntPtr phToken);
 
- if ($ContentAccessCredential) {
-  $advapi32 = Add-Type -Name advapi32 -MemberDefinition @"
-   // http://msdn.microsoft.com/en-us/library/aa378184.aspx
-   [DllImport("advapi32.dll", SetLastError = true)]
-   public static extern bool LogonUser(string lpszUsername, string lpszDomain, string lpszPassword, int dwLogonType, int dwLogonProvider, ref IntPtr phToken);
+  [DllImport("advapi32.dll", SetLastError=true)]
+  public extern static bool DuplicateToken(IntPtr ExistingTokenHandle, int SECURITY_IMPERSONATION_LEVEL, out IntPtr DuplicateTokenHandle);
 "@ -PassThru
 
-  if(!$advapi32::LogonUser($ContentAccessCredential.GetNetworkCredential().UserName, $ContentAccessCredential.GetNetworkCredential().Domain, $ContentAccessCredential.GetNetworkCredential().Password, 2, 0, [ref]$userToken)) {
+ if ($WindowsIdentity) {
+  [System.IntPtr]$userToken = $WindowsIdentity.Token
+ }
+ else {
+  [System.IntPtr]$userToken = [Security.Principal.WindowsIdentity]::GetCurrent().Token
+ }
+ [System.IntPtr]$userTokenDuplicate = [System.IntPtr]::new(0)
+
+ if ($Credential) {
+  $userName = $Credential.GetNetworkCredential().UserName
+  $domain = $Credential.GetNetworkCredential().Domain
+  $password = $Credential.GetNetworkCredential().Password
+  $logonProvider = 0			# 0 = LOGON32_PROVIDER_DEFAULT
+
+  if(!$advapi32::LogonUser($userName, $domain, $password, $LogonType, $logonProvider, [ref]$userToken)) {
    throw (New-Object System.ComponentModel.Win32Exception([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))
   }
  }
 
- return [Security.Principal.WindowsIdentity]$userToken
+ if (!$advapi32::DuplicateToken($userToken, $ImpersonationLevel, [ref]$userTokenDuplicate)) {
+  throw (New-Object System.ComponentModel.Win32Exception([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))
+ }
+
+ return [Security.Principal.WindowsIdentity]$userTokenDuplicate
 }
 
 
@@ -98,7 +119,7 @@ function Write-HttpServerLog {
    Write-Host ("$ServerName stopped.") -ForegroundColor 'Green'
   }
   default {
-   if(-not ($httpListenerContextIdentityName = $HttpListenerContext.Identity.Name)) {
+   if(-not ($httpListenerContextIdentityName = $HttpListenerContext.User.Identity.Name)) {
     $httpListenerContextIdentityName = 'Anonymous'
    }
    Write-Host ("$Event ")          -ForegroundColor 'Green'    -NoNewLine; Write-Host ($LogEntry)                                                      -ForegroundColor 'White' -NoNewLine
@@ -121,26 +142,35 @@ function Start-HTTPServer {
   [Parameter(Mandatory=$false)][switch]$DirectoryListingAllowed = $false,
 #  [Parameter(Mandatory=$false)][string[]]$HttpStatusResponses = (Get-HttpStatusDescriptions),
   [Parameter(Mandatory=$false)][ValidateSet('Anonymous','Basic','Digest','IntegratedWindowsAuthentication','Negotiate','None','Ntlm')][System.Net.AuthenticationSchemes[]]$AuthenticationSchemes = 'Anonymous',
-  [Parameter(Mandatory=$false)][System.Text.Encoding]$DefaultContentEncoding = [System.Text.Encoding]::Unicode,
+  [Parameter(Mandatory=$false)][System.Text.Encoding]$DefaultContentEncoding = [System.Text.Encoding]::Default, # [System.Text.Encoding]::Unicode, # [System.Text.Encoding]::ASCII,
   [Parameter(Mandatory=$false)][System.Management.Automation.PSCredential]$ContentAccessCredential = $null,
   [Parameter(Mandatory=$false)][string]$LogDateFormat = 'yyyy-MM-dd HH:mm:ss',
   [Parameter(Mandatory=$false)][string]$MimeTypesCsvPath = $null,
-  [Parameter(Mandatory=$false)][int]$MaxRequests = $null
+  [Parameter(Mandatory=$false)][int]$MaxRequests = $null,
+  [Parameter(Mandatory=$false)][switch]$OpenFirewall = $true
 #  $SSL STUFF
  )
 
  Add-Type -AssemblyName 'System.Web' # For [System.Web.MimeMapping] (.NET 4.5 only!)
-
+ try {
+  $null = [System.Web.MimeMapping]
+  $getMimeMappingAvailable = $true
+ }
+ catch {
+  $getMimeMappingAvailable = $false
+ }
 
  $ErrorActionPreference = 'Stop'
 
  $ContentAccessIdentity = Get-WindowsIdentity -Credential $ContentAccessCredential
 
 ### GET MIMETYPES BEGIN ###
+ $mimeTypesHash = New-Object -TypeName 'System.Collections.Hashtable'
+
  if ($MimeTypesCsvPath) {
   Write-Verbose "Importing MIME types from $MimeTypesCsvPath..."
 
-  $mimeTypesHash = New-Object -TypeName 'System.Collections.Hashtable'
+#  $mimeTypesHash = New-Object -TypeName 'System.Collections.Hashtable'
   $mimeTypes = Import-Csv -Path $MimeTypesCsvPath -Delimiter ';'
   foreach ($mimeType in $mimeTypes) {
    try {
@@ -150,28 +180,54 @@ function Start-HTTPServer {
   }
  }
  else {
-  $mimeTypeUrl = 'http://www.stdicon.com/mimetypes'
+  $mimeTypeUrl = 'http://svn.apache.org/viewvc/httpd/httpd/trunk/docs/conf/mime.types?view=co'
 
-  Write-Verbose "Importing MIME types from $mimeTypeUrl..."
+  Write-Verbose ("Importing MIME types from $mimeTypeUrl...")
 
-  $mimeTypesJSON = (Invoke-WebRequest $mimeTypeUrl).Content					# Broken "JSON" coming from this
-  $mimeTypesJSON = $mimeTypesJSON -replace '\\(.)', '$1'
-  $mimeTypesJSON = $mimeTypesJSON.Replace('[{','{').Replace('}, {',', ').Replace('}]','}')	# Now it's real JSON
-  [System.Collections.Hashtable]$mimeTypesHash = [System.Management.Automation.ScriptBlock]::Create('@' + $mimeTypesJSON.Replace('": "','"="').Replace('", "','"; "')).Invoke()[0]
-
-<#  $mimeTypesJSON = Invoke-WebRequest $mimeTypeUrl | ConvertFrom-Json
-  $mimeTypesHash = New-Object hashtable
-  for($i = 0; $i -lt $j.Count; $i++) {
-   try {
-    $mimeTypeDefinition = ($j[$i]|gm)[-1].Definition.Replace('System.String ','').Split('=')
-    $null = $mimeTypesHash.Add($mimeTypeDefinition[0], $mimeTypeDefinition[1])
+  try {
+   $mimeTypesList = (Invoke-WebRequest $mimeTypeUrl).Content
+   $mimeTypesListArray = $mimeTypesList.Split("`n").Trim() | Where-Object {$_ -and -not $_.StartsWith('#')}
+   foreach ($mimeTypeEntry in $mimeTypesListArray) {
+    $mimeTypeEntrySplit = $mimeTypeEntry.Split("`t")
+    $mimeTypeEntryName = $mimeTypeEntrySplit[0]
+    $mimeTypeEntryExts = $mimeTypeEntrySplit[-1]
+    $mimeTypeEntryExtsSplit = $mimeTypeEntryExts.Split(' ')
+    foreach ($mimeTypeEntryExt in $mimeTypeEntryExtsSplit) {
+     if ($mimeTypeEntryExt -and -not $mimeTypesHash.ContainsKey($mimeTypeEntryExt)) {
+      $mimeTypesHash.Add($mimeTypeEntryExt, $mimeTypeEntryName)
+     }
+     else {
+      Write-Verbose (' Skipping ' + $mimeTypeEntryName + ' - ' + $mimeTypeEntryExt + ' already exists: ' + $mimeTypesHash[$mimeTypeEntryExt])
+     }
+    }
    }
-   catch {}
-  }#>
+  }
+  catch {
+   Write-Error ("Failed to import MIME types from $mimeTypeUrl")
+   Write-Error $_
+  }
  }
 
  Write-Verbose ('Imported ' + $mimeTypesHash.Count + ' MIME types.')
 ### GET MIMETYPES  END  ###
+
+### OPEN FIREWALL BEGIN ###
+
+ if ($OpenFirewall) {
+  $displayName = 'Allow Tiny HTTP Server'
+  $localPort = [System.Int32[]]@()
+  foreach ($binding in $Bindings) {
+   $localPort += ,[System.Int32]($binding.Split(':')[-1].Split('/')[0])
+  }
+  $protocol = 'TCP'
+  $remoteAddress = 'LocalSubnet'
+
+  Write-Verbose ('Creating firewall rule "' + $displayName + '" for port(s) ' + [System.String]::Join(',', $localPort))
+
+  $netFirewallRule = New-NetFirewallRule -DisplayName $displayName -Direction 'Inbound' -Protocol $protocol -LocalPort $localPort -RemoteAddress $remoteAddress -Action 'Allow'
+ }
+
+### OPEN FIREWALL  END  ###
 
  [System.Net.HttpListener]$httpListener = New-HttpListener -Bindings $Bindings -AuthenticationSchemes $AuthenticationSchemes
 
@@ -203,8 +259,7 @@ function Start-HTTPServer {
    foreach ($binding in $httpListener.Prefixes) {
 #    if ($httpListenerContext.Request.Url.AbsoluteUri.Length -gt $binding.Length) {
 #     $path = '/' + [System.Net.WebUtility]::UrlDecode($httpListenerContext.Request.Url.AbsoluteUri.Remove(0, $binding.Length))
-    $bindingUri = [System.Uri]$binding
-#   .Replace('+','localhost') # Only for host; allowed in path!
+    $bindingUri = [System.Uri]($binding.Replace('://*', '://localhost').Replace('://+', '://localhost')) # Only for host; allowed in path!
     if ($httpListenerContext.Request.Url.LocalPath.Length -gt $bindingUri.LocalPath.Length) {
      $path = '/' + [System.Net.WebUtility]::UrlDecode($httpListenerContext.Request.Url.LocalPath.Remove(0, $bindingUri.LocalPath.Length))
     }
@@ -216,12 +271,35 @@ function Start-HTTPServer {
 
    $impersonationContext = $null
    try {
+    try {
 ### IMPERSONATE CLIENT OR SERVER ACCOUNT BEGIN ###
-    if ($httpListenerContext.User.Identity) {
-     $impersonationContext = $httpListenerContext.User.Identity.Impersonate()
+     if ($httpListenerContext.User.Identity) {
+      if ($httpListenerContext.User.Identity.Impersonate) {
+       $windowsIdentity = $httpListenerContext.User.Identity
+      }
+      elseif ($httpListenerContext.User.Identity.Name -and $httpListenerContext.User.Identity.Password) {
+       $userName = $httpListenerContext.User.Identity.Name
+       $password = ConvertTo-SecureString -String $httpListenerContext.User.Identity.Password -AsPlainText -Force
+       $psCredential = [System.Management.Automation.PSCredential]::new($userName, $password)
+       $windowsIdentity = Get-WindowsIdentity -Credential $psCredential
+      }
+      else {
+       Write-Warning -Message ('User identity provided in call but cannot figure out how to handle it')
+       $windowsIdentity = $ContentAccessIdentity
+      }
+     }
+     elseif ($ContentAccessIdentity) {
+      $windowsIdentity = $ContentAccessIdentity
+     }
+     else {
+      $windowsIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+     }
+     $impersonationContext = $windowsIdentity.Impersonate()
+     Write-Verbose ('Impersonating ' + [System.Security.Principal.WindowsIdentity]::GetCurrent($true).Name)
     }
-    else {
-     $impersonationContext = $ContentAccessIdentity.Impersonate()
+    catch {
+     Write-Verbose ('Impersonation of ' + [System.Security.Principal.WindowsIdentity]::GetCurrent($true).Name + " failed:`n" + $_)
+     throw $_
     }
 ### IMPERSONATE CLIENT OR SERVER ACCOUNT  END  ###
 
@@ -233,17 +311,10 @@ function Start-HTTPServer {
       if (Test-Path -Path (Join-Path -Path $item -ChildPath $DefaultDocument)) {
    # IS DEFAULT DOCUMENT BEGIN #
        $item = Get-Item -Path (Join-Path -Path $item -ChildPath $DefaultDocument)
-       $httpListenerContext.Response.StatusCode = [System.Net.HttpStatusCode]::OK
-       $httpListenerContext.Response.StatusDescription = 'OK'
-       $httpListenerContext.Response.ContentType = [System.Web.MimeMapping]::GetMimeMapping($item.FullName) # Only .NET 4.5+
-       $buffer = [System.IO.File]::ReadAllBytes($item.FullName)
-       if ($httpListenerContext.Response.ContentType.Split('/')[0] -eq 'text') {
-        $httpListenerContext.Response.ContentEncoding = Get-ContentEncoding -Buffer ($buffer[0..3])
-       }
-       $logEntry = $item.FullName
    # IS DEFAULT DOCUMENT  END  #
       }
       elseif ($DirectoryListingAllowed) {
+   # LIST DIRECTORY BEGIN #
        $httpListenerContext.Response.StatusCode = [System.Net.HttpStatusCode]::OK
        $httpListenerContext.Response.StatusDescription = 'OK'
        $httpListenerContext.Response.ContentType = 'text/html'
@@ -253,6 +324,7 @@ function Start-HTTPServer {
 #       $httpListenerResponseString = '<html><head><title>Directory listing for ' + [System.Net.WebUtility]::UrlDecode($httpListenerContext.Request.RawUrl) + '</title></head><body><pre>' + [System.Net.WebUtility]::HtmlEncode(($item.EnumerateFileSystemInfos() | Sort-Object -Property ('Mode', 'Name') | Format-Table | Out-String)) + '</pre></body></html>'
        $buffer = $httpListenerContext.Response.ContentEncoding.GetBytes($httpListenerResponseString)
        $logEntry = 'Directory listing for ' + $item.FullName
+   # LIST DIRECTORY  END  #
       }
       else {
        $httpListenerContext.Response.StatusCode = [System.Net.HttpStatusCode]::Forbidden
@@ -265,14 +337,121 @@ function Start-HTTPServer {
       }
   # IS DIRECTORY  END  #
      }
-     else {
+
+     if (-not $item.PSIsContainer) {
   # IS FILE BEGIN #
-      $httpListenerContext.Response.StatusCode = [System.Net.HttpStatusCode]::OK
-      $httpListenerContext.Response.StatusDescription = 'OK'
-      $httpListenerContext.Response.ContentType = [System.Web.MimeMapping]::GetMimeMapping($item.FullName) # Only .NET 4.5+
-      $buffer = [System.IO.File]::ReadAllBytes($item.FullName)
-      if ($httpListenerContext.Response.ContentType.Split('/')[0] -eq 'text') {
-       $httpListenerContext.Response.ContentEncoding = Get-ContentEncoding -Buffer ($buffer[0..3])
+      if ($item.Extension -eq '.ps1') {
+   # IS POWERSHELL SCRIPT BEGIN #
+       $variables = New-Object -TypeName 'System.Collections.Hashtable'
+       $queryDelimiters = [System.Char[]](@('&'))
+       if ($httpListenerContext.Request.Url.Query) {
+        foreach ($variable in $httpListenerContext.Request.Url.Query.Substring(1).Split($queryDelimiters)) {
+         $equalsIndex = $variable.IndexOf('=')
+         $variableName = [System.Uri]::UnescapeDataString($variable.Substring(0, $equalsIndex))
+         $variableValue = [System.Uri]::UnescapeDataString($variable.Substring($equalsIndex + 1))
+         $variables.Add($variableName, $variableValue)
+        }
+       }
+
+       Write-Verbose ('Executing ' + $item + ($variables.Keys | ForEach-Object {' -' + $_ + ' ''' + $variables[$_] + ''''}))
+
+    # EXECUTE PS1 BEGIN #
+       $executionPolicy = Get-ExecutionPolicy
+       Set-ExecutionPolicy -ExecutionPolicy 'Bypass' -Scope 'Process' -Force
+       $result = .$item @variables
+       Set-ExecutionPolicy -ExecutionPolicy $executionPolicy -Scope 'Process' -Force
+    # EXECUTE PS1  END  #
+
+       if ($result.GetType() -ne [System.Collections.Hashtable]) {
+        $result = @{'Data' = $result}
+       }
+
+       if ($result.StatusCode) {
+        $httpListenerContext.Response.StatusCode = [System.Net.HttpStatusCode]($result.StatusCode)
+       }
+       else {
+        $httpListenerContext.Response.StatusCode = [System.Net.HttpStatusCode]::OK
+       }
+
+       if ($result.StatusDescription) {
+        $httpListenerContext.Response.StatusDescription = $result.StatusDescription
+       }
+       else {
+        $httpListenerContext.Response.StatusDescription = 'OK'
+       }
+
+       if ($result.ContentType) {
+        $httpListenerContext.Response.ContentType = $result.ContentType
+       }
+       else {
+        if ($getMimeMappingAvailable) {
+         $httpListenerContext.Response.ContentType = [System.Web.MimeMapping]::GetMimeMapping('.htm') # Only .NET 4.5+
+        }
+        else {
+         if ($mimeTypesHash.Contains($item.Extension)) {
+          $httpListenerContext.Response.ContentType = $mimeTypesHash[$item.Extension]
+         }
+         else {
+          $httpListenerContext.Response.ContentType = 'application/octet-stream'
+         }
+        }
+       }
+
+       if ($result.ContentEncoding) {
+        $httpListenerContext.Response.ContentEncoding = $result.ContentEncoding
+       }
+       else {
+        $httpListenerContext.Response.ContentEncoding = $DefaultContentEncoding
+       }
+
+       $verboseOutput = [System.String]::Empty
+       if ($result.Data) {
+        if ($result.Data.GetType() -eq [System.Byte[]]) {
+         $buffer = $result.Data
+
+         $verboseOutput = " Returned " + $result.Data.Length.ToString() + ' bytes'
+        }
+        else {
+         $buffer = $httpListenerContext.Response.ContentEncoding.GetBytes($result.Data)
+
+         $verboseData = $result.Data | Out-String
+         $verboseDataMaxLength = 150
+         $verboseOutput = if ($verboseData.Length -gt $verboseDataMaxLength) {
+          $verboseData.SubString(0, $verboseDataMaxLength) + ' (...)'
+         }
+         else {
+          $verboseOutput = " Returned`n" + $verboseData
+         }
+        }
+       }
+
+       Write-Verbose ($verboseOutput)
+
+#       if ($httpListenerContext.Response.ContentType.Split('/')[0] -eq 'text') {
+#        $httpListenerContext.Response.ContentEncoding = Get-ContentEncoding -Buffer ($buffer[0..3])
+#       }
+   # IS POWERSHELL SCRIPT  END  #
+      }
+      else {
+   # IS REGULAR FILE BEGIN #
+       $httpListenerContext.Response.StatusCode = [System.Net.HttpStatusCode]::OK
+       $httpListenerContext.Response.StatusDescription = 'OK'
+       if ($getMimeMappingAvailable) {
+        $httpListenerContext.Response.ContentType = [System.Web.MimeMapping]::GetMimeMapping($item.FullName) # Only .NET 4.5+
+       }
+       else {
+        if ($mimeTypesHash.Contains($item.Extension)) {
+         $httpListenerContext.Response.ContentType = $mimeTypesHash[$item.Extension]
+        }
+        else {
+         $httpListenerContext.Response.ContentType = 'application/octet-stream'
+        }
+       }
+       $buffer = [System.IO.File]::ReadAllBytes($item.FullName)
+       if ($httpListenerContext.Response.ContentType.Split('/')[0] -eq 'text') {
+        $httpListenerContext.Response.ContentEncoding = Get-ContentEncoding -Buffer ($buffer[0..3])
+       }
+   # IS REGULAR FILE  END  #
       }
       $logEntry = $item.FullName
   # IS FILE  END  #
@@ -293,16 +472,17 @@ function Start-HTTPServer {
    }
    catch {
  ## GENERAL ERROR CATCHING BEGIN ##
+    Write-Verbose ("General error catch:`n" + $_)
 
-  # CAN NOT IMPERSONATE OR CAN NOT ACCESS ITEM BEGIN #
-    $httpListenerContext.Response.StatusCode = [System.Net.HttpStatusCode]::Forbidden
-    $httpListenerContext.Response.StatusDescription = 'Access forbidden'
+  # INTERNAL SERVER ERROR BEGIN #
+    $httpListenerContext.Response.StatusCode = [System.Net.HttpStatusCode]::InternalServerError
+    $httpListenerContext.Response.StatusDescription = 'Internal server error'
     $httpListenerContext.Response.ContentType = 'text/html'
     $httpListenerContext.Response.ContentEncoding = $DefaultContentEncoding
-    $httpListenerResponseString = '<html><head><title>403</title></head><body><h1>403 - Access forbidden</h1></body></html>' #403.2 = Read access forbidden
+    $httpListenerResponseString = '<html><head><title>403</title></head><body><h1>500 - Internal server error</h1></body></html>'
     $buffer = $httpListenerContext.Response.ContentEncoding.GetBytes($httpListenerResponseString)
-    $logEntry = '403 - Access forbidden for ' + (Join-Path -Path $BaseDirectory -ChildPath $path)
-  # CAN NOT IMPERSONATE OR CAN NOT ACCESS ITEM  END  #
+    $logEntry = '500 - Internal server error for ' + (Join-Path -Path $BaseDirectory -ChildPath $path)
+  # INTERNAL SERVER ERROR  END  #
  ## GENERAL ERROR CATCHING  END ##
    }
    finally {
@@ -315,16 +495,21 @@ function Start-HTTPServer {
 
    $httpListenerContext.Response.KeepAlive = $false
 
-### SET MIMETYPE BEGIN ###
+### ENSURE MIMETYPE BEGIN ###
    if ($item.Extension -and -not $httpListenerContext.Response.ContentType) {
-    if ($mimeTypesHash.Contains($item.Extension)) {
-     $httpListenerContext.Response.ContentType = $mimeTypesHash[$item.Extension]
+    if ($getMimeMappingAvailable) {
+     $httpListenerContext.Response.ContentType = [System.Web.MimeMapping]::GetMimeMapping($item.Extension) # Only .NET 4.5+
     }
     else {
-     $httpListenerContext.Response.ContentType = 'application/octet-stream'
+     if ($mimeTypesHash.Contains($item.Extension)) {
+      $httpListenerContext.Response.ContentType = $mimeTypesHash[$item.Extension]
+     }
+     else {
+      $httpListenerContext.Response.ContentType = 'application/octet-stream'
+     }
     }
    }
-### SET MIMETYPE  END  ###
+### ENSURE MIMETYPE  END  ###
 
 ### ENSURE CONTENTENCODING BEGIN ###
    if (-not $httpListenerContext.Response.ContentEncoding) {
@@ -358,6 +543,12 @@ function Start-HTTPServer {
   Write-Host $_ -ForegroundColor 'Red' -BackgroundColor 'Black'
  }
  finally {
+  if ($netFirewallRule) {
+   Write-Verbose ('Removing firewall rule "' + $displayName + '"')
+
+   $netFirewallRule | Remove-NetFirewallRule
+  }
+
   if ($httpListener.IsListening) {
    $httpListener.Stop()
 
@@ -372,3 +563,12 @@ function Start-HTTPServer {
 }
 
 # Binding to hostnames + or * or to port 80 requires local admin!
+#Start-HTTPServer -Bindings ('http://' + $env:COMPUTERNAME + ':800/') -BaseDirectory '~\httpAppTest' -DefaultDocument 'Get-Memory.htm' -MaxRequests 5 -Verbose  -AuthenticationSchemes Basic -MimeTypesCsvPath '~\Desktop\httpAppTest\MimeTypes.csv'
+
+#$ipAddress = (Get-NetIPAddress -AddressFamily 'IPv4' -AddressState 'Preferred' | Where-Object {$_.InterfaceAlias -notlike 'Loopback*'})[0].IPAddress
+#Start-HTTPServer -Bindings ('http://' + $ipAddress + ':800/') -BaseDirectory '~\Desktop\httpAppTest' -DefaultDocument 'Get-MemoryHTML.ps1' -Verbose  -AuthenticationSchemes Basic
+
+#Set-Location -Path '~\Desktop\httpAppTest'
+#Start-HTTPServer -Verbose
+
+Start-HTTPServer -Bindings ('http://*:80/') -BaseDirectory '~\Desktop\httpAppTest' -Verbose
