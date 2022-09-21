@@ -1,0 +1,236 @@
+
+### ENSURE BEGIN ###
+
+function Ensure-PackageAssembly {
+ param (
+  [Parameter(Mandatory=$true)][System.String]$Name = 'Stub.System.Data.SQLite.Core.NetFramework',
+  [Parameter(Mandatory=$true)][System.String]$Path = $env:USERPROFILE + '\Desktop\',
+  [Parameter(Mandatory=$true)][System.String]$AssemblyRelativePath = '\lib\net46\System.Data.SQLite.dll',
+  [Parameter(Mandatory=$false)][System.Version]$RequiredVersion = $null, # = '1.0.116.0',
+  [Parameter(Mandatory=$false)][System.String]$Source = $null # = 'NuGet'
+ )
+
+ $packageExtractPath = Join-Path -Path $Path -ChildPath $Name
+ $assemblyPath = Join-Path -Path $packageExtractPath -ChildPath $AssemblyRelativePath
+
+ if (-not (Test-Path -Path $assemblyPath)) {
+  $savePackageParams = @{
+   'Name'   = $Name;
+   'Path'   = $Path
+  }
+  if ($RequiredVersion) {
+   $savePackageParams.Add('RequiredVersion', $RequiredVersion)
+  }
+  if ($Source) {
+   $savePackageParams.Add('Source', $Source)
+  }
+  $package = Save-Package @savePackageParams
+  $packagePath = Join-Path -Path $Path -ChildPath ($package.PackageFilename)
+  $packageItem = Get-Item -Path $packagePath
+  $packageItemRenamed = Rename-Item -Path ($packageItem.FullName) -NewName ($packageItem.BaseName + '.zip') -PassThru
+  Expand-Archive -Path ($packageItemRenamed.FullName) -DestinationPath $packageExtractPath
+  Remove-Item -Path ($packageItemRenamed.FullName)
+ }
+
+ $assemblyItem = Get-Item -Path $assemblyPath
+
+ return $assemblyItem
+}
+
+$assemblyItem = Ensure-PackageAssembly -Name 'Stub.System.Data.SQLite.Core.NetFramework' -Path ($env:USERPROFILE + '\Desktop\') -AssemblyRelativePath '\lib\net46\System.Data.SQLite.dll' -Source 'NuGet'
+$type = Add-Type -Path ($assemblyItem.FullName) -PassThru
+
+### ENSURE  END  ###
+
+
+### SQLite-ToDataSet BEGIN ###
+
+function SQLite-ToDataSet {
+ param (
+  [System.Data.SQLite.SQLiteConnection]$SQLiteConnection,
+  [System.String[]]$Columns = '*', # @('DeptNo', 'DName'),
+  [System.String]$Table = $null # 'Dept'
+ )
+
+ if ($SQLiteConnection.State -eq [System.Data.ConnectionState]::Closed) {
+  $SQLiteConnection.Open()
+ }
+ elseif ($SQLiteConnection.State -ne [System.Data.ConnectionState]::Open) {
+  throw ($SQLiteConnection.State)
+ }
+
+ if ($Table) {
+  [System.String[]]$tableNames = $Table
+ }
+ else {
+  $sqliteCommand = $SQLiteConnection.CreateCommand()
+#  $sqliteCommand.CommandText = 'SELECT name FROM sqlite_schema WHERE type=''table'''
+#  $sqliteCommand.CommandText = 'SELECT name FROM sqlite_temp_master WHERE type=''table'''
+  $sqliteCommand.CommandText = 'SELECT name FROM sqlite_master WHERE type=''table'''
+  $sqliteReader = $sqliteCommand.ExecuteReader()
+  if (-not $sqliteReader.HasRows) {
+   throw ('No tables')
+  }
+
+  [System.String[]]$tableNames = @()
+  while ($sqliteReader.Read()) {
+   $tableNames += $sqliteReader.GetString(0)
+  }
+ }
+
+ foreach ($table in $tableNames) {
+  $SelectCommand = 'SELECT ' + [System.String]::Join(', ', $Columns) + ' FROM ' + $Table
+
+  $sqliteDataAdapter = [System.Data.SQLite.SQLiteDataAdapter]::new($SelectCommand, $SQLiteConnection)
+  $sqliteDataAdapter.MissingSchemaAction = [System.Data.MissingSchemaAction]::AddWithKey
+  $dataSet = [System.Data.DataSet]::new()
+
+  $rowsAffects = $sqliteDataAdapter.Fill($dataSet, $Table)
+ }
+
+ return $dataSet
+}
+
+### SQLite-ToDataSet  END  ###
+
+
+### DataSet-ToSQLite BEGIN ###
+
+function DataSet-ToSQLite {
+ param (
+  [System.Data.SQLite.SQLiteConnection]$SQLiteConnection = [System.Data.SQLite.SQLiteConnection]::new('DataSource=:MEMORY:'),
+  $Data = $null, # System.Data.DataSet dataSet, System.Data.DataRow[], System.Data.DataTable
+  $Table = $null
+ )
+
+ if ($SQLiteConnection.State -eq [System.Data.ConnectionState]::Closed) {
+  $SQLiteConnection.Open()
+ }
+ elseif ($SQLiteConnection.State -ne [System.Data.ConnectionState]::Open) {
+  throw ($SQLiteConnection.State)
+ }
+
+ if ($Table) {
+  [System.String[]]$tableNames = $Table
+ }
+ else {
+  [System.String[]]$tableNames = $Data.Tables.TableName
+ }
+
+ foreach ($table in $tableNames) {
+  $columnDefinitions = @()
+  foreach ($column in $Data.Tables[$Table].Columns) {
+#   Ought to create mapping between Types and DBTypes AnsiString, Binary, Byte, Boolean, Currency, Date, DateTime, Decimal, Double, Guid, Int16, Int32, Int64, Object, SByte, Single, String, Time, UInt16, UInt32, UInt64, VarNumeric, AnsiStringFixedLength, StringFixedLength, Xml, DateTime2, DateTimeOffset
+   $columnDefinitions += ($column.ColumnName + ' ' + $column.DataType.Name)
+  }
+
+  $sqliteCommand = $SQLiteConnection.CreateCommand()
+  $sqliteCommand.CommandText = 'CREATE TABLE IF NOT EXISTS ' + $Table + ' (' + [System.String]::Join(', ', $columnDefinitions) + ')'
+  $rowsAffected = $sqliteCommand.ExecuteNonQuery()
+
+  $InsertCommand = 'INSERT INTO ' + $Table + ' (' + [System.String]::Join(', ', $Data.Tables.Columns.ColumnName) + ') VALUES (:' + [System.String]::Join(', :', $Data.Tables.Columns.ColumnName) + ')'
+
+  $sqliteDataAdapter = [System.Data.SQLite.SQLiteDataAdapter]::new($SQLiteConnection)
+  $sqliteDataAdapter.MissingSchemaAction = [System.Data.MissingSchemaAction]::AddWithKey
+  $sqliteDataAdapter.InsertCommand = [System.Data.SQLite.SQLiteCommand]::new($InsertCommand, $SQLiteConnection)
+
+  foreach ($column in $Data.Tables[$Table].Columns) {
+   $null += $sqliteDataAdapter.InsertCommand.Parameters.Add($column.ColumnName, $column.DataType.Name, $column.MaxLength, $column.ColumnName)
+  }
+
+  $rowsAffected = $sqliteDataAdapter.Update($Data, $Table)
+ }
+
+ return $SQLiteConnection
+}
+
+### DataSet-ToSQLite  END  ###
+
+
+### TESTS BEGIN ###
+
+$sqliteConnection1 = [System.Data.SQLite.SQLiteConnection]::new('DataSource=:MEMORY:')
+$sqliteConnection1.Open()
+$sqliteCommand = $sqliteConnection1.CreateCommand()
+$sqliteCommand.CommandText = 'CREATE TABLE IF NOT EXISTS Dept (DeptNo Int32, DName String)'
+$sqliteCommand.ExecuteNonQuery()
+
+$transaction = $sqliteConnection1.BeginTransaction()
+
+$command = $sqliteConnection1.CreateCommand();
+$command.CommandText = @'
+ INSERT INTO Dept
+ VALUES ($DeptNo, $DName)
+'@
+
+$parameter1 = $command.CreateParameter()
+$parameter1.ParameterName = '$DeptNo'
+$null = $command.Parameters.Add($parameter1)
+
+$parameter2 = $command.CreateParameter()
+$parameter2.ParameterName = '$DName'
+$null = $command.Parameters.Add($parameter2)
+
+$parameter2.Value = 'aweg'
+
+$random = [Random]::new()
+for ($i = 0; $i -lt 150; $i++)
+{
+ $parameter1.Value = $random.Next()
+ $null = $command.ExecuteNonQuery()
+}
+
+$transaction.Commit()
+
+####
+
+$dataSet1 = SQLite-ToDataSet -SQLiteConnection $sqliteConnection1
+
+####
+
+$rowVals = [object[]]::new(2)
+$rowVals[0] = 46
+$rowVals[1] = 'ffOperations'
+$dataSet1.Tables['Dept'].Rows.Add($rowVals)
+$dataSet1.Tables['Dept']
+
+$sqliteConnection2 = DataSet-ToSQLite -Data $dataSet1
+
+$dataSet2 = SQLite-ToDataSet -SQLiteConnection $sqliteConnection2
+$dataSet2.Tables
+
+####
+
+$dataTable3 = [System.Data.DataTable]::new('dataTable')
+$null = $dataTable3.Columns.Add('Column1')
+$null = $dataTable3.Columns.Add('Column2')
+$null = $dataTable3.Rows.Add('Col1Row1', 'Col2Row1')
+$null = $dataTable3.Rows.Add('Col1Row2', 'Col2Row2')
+$null = $dataTable3.Rows.Add('Col1Row3', 'Col2Row3')
+
+$dataSet3 = [System.Data.DataSet]::new('dataSet')
+$null = $dataSet3.Tables.Add($dataTable3)
+$dataSet3.Tables
+
+$sqliteConnection3 = DataSet-ToSQLite -Data $dataSet3
+
+$sqliteCommand = $sqliteConnection3.CreateCommand()
+$sqliteCommand.CommandText = 'SELECT * FROM dataTable WHERE Column1 = ''Col1Row2'''
+#$sqliteCommand.CommandText = 'SELECT * FROM sqlite_master'
+$sqliteReader = $sqliteCommand.ExecuteReader()
+if (-not $sqliteReader.HasRows) {
+ Write-Warning -Message 'No rows'
+}
+while ($sqliteReader.Read()) {
+ $dataOut = [pscustomobject]@{}
+ for ($i = 0; $i -lt $sqliteReader.FieldCount; $i++) {
+  $dataOut | Add-Member -MemberType 'NoteProperty' -Name ($sqliteReader.GetName($i)) -Value ($sqliteReader.GetValue($i))
+ }
+ $dataOut
+}
+$sqliteReader.Dispose()
+
+$dataSet4 = SQLite-ToDataSet -SQLiteConnection $sqliteConnection3
+$dataSet4.Tables
+
+
